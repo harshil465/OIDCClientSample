@@ -24,7 +24,7 @@
             <ComboBox x:Name="FlowComboBox" Width="180" Margin="5,0" VerticalAlignment="Center">
                 <ComboBoxItem Content="Authorization Code (Interactive)" IsSelected="True"/>
                 <ComboBoxItem Content="Client Credentials (Service)"/>
-                <ComboBoxItem Content="OIDC then SAML (Hybrid)"/>
+            
             </ComboBox>
             <Button x:Name="LoginButton" Content="Login" Width="80" Margin="10,0" Click="LoginButton_Click"/>
             <Button x:Name="LogoutButton" Content="Logout" Width="80" Margin="10,0" Click="LogoutButton_Click" IsEnabled="False"/>
@@ -44,4 +44,5 @@
             <TextBox x:Name="TokenTextBox" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="10"/>
         </ScrollViewer>
     </Grid>
+
 </Window>
