@@ -44,7 +44,6 @@ namespace OidcClientSample
         public string SamlSpEntityId { get; set; }
         public string SamlAcsUrl { get; set; }
         // Additional properties
-        public Dictionary<string, string> ExtraParameters { get; set; } = new Dictionary<string, string>();
         public string TenantId { get; set; }
     }
 
@@ -57,7 +56,6 @@ namespace OidcClientSample
         public string[] Scopes { get; set; }
         public string Audience { get; set; }
         public string TenantId { get; set; }
-        public Dictionary<string, string> ExtraParameters { get; set; } = new Dictionary<string, string>();
     }
 
     public class SamlAssertionResult
@@ -103,10 +101,6 @@ namespace OidcClientSample
             RedirectUri = "https://localhost:5001/",
             PostLogoutRedirectUri = "https://localhost:5001/logout",
             Scopes = new[] { "openid", "profile", "email" },
-            ExtraParameters = new Dictionary<string, string>
-            {
-                ["audience"] = "https://dev-t2bzy5qqqml628wg.us.auth0.com/api/v2/"
-            },
             // SAML Configuration
             SamlIdpUrl = "https://dev-t2bzy5qqqml628wg.us.auth0.com/samlp/your-client-id",
             SamlSpEntityId = "urn:your-app:saml",
@@ -192,103 +186,12 @@ namespace OidcClientSample
                 await WebView.EnsureCoreWebView2Async(null);
                 _customBrowser = new CustomWebViewBrowser(WebView);
 
-                await SetupHttpInterception();
-
                 StatusTextBlock.Text = "Ready for authentication with IdentityModel.OidcClient";
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"Failed to initialize WebView2: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
-        }
-
-        private async Task SetupHttpInterception()
-        {
-            // Enable network access for SAML interception
-            WebView.CoreWebView2.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
-            WebView.CoreWebView2.WebResourceRequested += CoreWebView2_WebResourceRequested;
-            WebView.CoreWebView2.WebResourceResponseReceived += CoreWebView2_WebResourceResponseReceived;
-            WebView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
-            WebView.CoreWebView2.NavigationCompleted += CoreWebView2_NavigationCompleted;
-        }
-
-        private async void CoreWebView2_WebResourceRequested(object sender, CoreWebView2WebResourceRequestedEventArgs e)
-        {
-            // SAML interception logic (same as MSAL version)
-            if (e.Request.Method == "POST" && _currentFlow == AuthFlow.OidcThenSaml && _samlCompletionSource != null)
-            {
-                var uri = e.Request.Uri;
-                var config = GetCurrentOAuthConfig();
-
-                if (uri.Contains(config.SamlAcsUrl))
-                {
-                    StatusTextBlock.Text = "Intercepting SAML POST request...";
-
-                    if (e.Request.Content != null)
-                    {
-                        var content = await GetStreamContentAsync(e.Request.Content);
-                        var samlResult = ExtractSamlFromPostData(content);
-
-                        if (samlResult.IsValid)
-                        {
-                            _samlCompletionSource?.TrySetResult(samlResult);
-                        }
-                    }
-                }
-            }
-        }
-
-        private async void CoreWebView2_WebResourceResponseReceived(object sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
-        {
-            // SAML response interception (same logic as MSAL version)
-            if (_currentFlow == AuthFlow.OidcThenSaml && _samlCompletionSource != null)
-            {
-                var uri = e.Request.Uri;
-                var config = GetCurrentOAuthConfig();
-
-                if (uri.Contains(config.SamlIdpUrl))
-                {
-                    try
-                    {
-                        var headers = string.Join("\r\n", e.Response.Headers.Select(header => $"{header.Key}: {header.Value}"));
-                        var response = WebView.CoreWebView2.Environment.CreateWebResourceResponse(
-                            await e.Response.GetContentAsync(), e.Response.StatusCode, e.Response.ReasonPhrase, headers);
-
-                        if (response.Content != null)
-                        {
-                            var content = await GetStreamContentAsync(response.Content);
-                            var samlResult = ExtractSamlFromHtmlContent(content);
-
-                            if (samlResult.IsValid)
-                            {
-                                _samlCompletionSource?.TrySetResult(samlResult);
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // Fallback
-                    }
-                }
-            }
-        }
-
-        private async void CoreWebView2_NavigationStarting(object sender, CoreWebView2NavigationStartingEventArgs e)
-        {
-            if (_currentFlow == AuthFlow.OidcThenSaml && _samlCompletionSource != null)
-            {
-                var config = GetCurrentOAuthConfig();
-
-                if (e.Uri.StartsWith(config.SamlAcsUrl) || e.Uri.Contains("saml") || e.Uri.Contains("SAMLResponse"))
-                {
-                    StatusTextBlock.Text = "Processing SAML response...";
-                }
-            }
-        }
-
-        private async void CoreWebView2_NavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
-        {
-            // Navigation completed logic
         }
 
         private async void LoginButton_Click(object sender, RoutedEventArgs e)
@@ -306,9 +209,6 @@ namespace OidcClientSample
                         break;
                     case AuthFlow.ClientCredentials:
                         await PerformClientCredentialsFlow();
-                        break;
-                    case AuthFlow.OidcThenSaml:
-                        await PerformOidcThenSamlFlow();
                         break;
                 }
             }
@@ -344,8 +244,7 @@ namespace OidcClientSample
                     {
                         Discovery = new DiscoveryPolicy
                         {
-                            ValidateIssuerName = false,
-                            ValidateEndpoints = false
+                            RequireKeySet = false
                         }
                     }
                 };
@@ -361,7 +260,6 @@ namespace OidcClientSample
                         TokenEndpoint = $"{config.Authority}/v1/token",
                         EndSessionEndpoint = $"{config.Authority}/v1/logout",
                         UserInfoEndpoint = $"{config.Authority}/v1/userinfo",
-                        TokenEndPointAuthenticationMethods = new[] { "client_secret_basic", "client_secret_post" }
                     };
                 }
                 else if (_currentProvider == OAuthProvider.EntraId)
@@ -378,22 +276,6 @@ namespace OidcClientSample
                         TokenEndPointAuthenticationMethods = new[] { "client_secret_basic", "client_secret_post" }
                     };
                 }
-                // For Auth0, let it use discovery (it works well with Auth0)
-
-                // Add extra parameters
-                //if (config.ExtraParameters?.Any() == true)
-                //{
-                //    foreach (var param in config.ExtraParameters)
-                //    {
-                //        options.Parameters.Add(param.Key, param.Value);
-                //    }
-                //}
-
-                //// Provider-specific configurations
-                //if (_currentProvider == OAuthProvider.Auth0)
-                //{
-                //    options.Parameters.Add("audience", config.ExtraParameters["audience"]);
-                //}
 
                 _oidcClient = new OidcClient(options);
 
@@ -466,272 +348,6 @@ namespace OidcClientSample
                 StatusTextBlock.Text = $"Client Credentials Error: {ex.Message}";
                 TokenTextBox.Text = ex.ToString();
                 LoginButton.IsEnabled = true;
-            }
-        }
-
-        private async Task PerformOidcThenSamlFlow()
-        {
-            try
-            {
-                StatusTextBlock.Text = $"Step 1: Authenticating with {_currentProvider} using OIDC...";
-                WebView.Visibility = Visibility.Visible;
-
-                // Step 1: OIDC Authentication
-                await PerformInteractiveLogin();
-
-                if (_currentLoginResult?.IsError != false)
-                {
-                    throw new Exception("OIDC authentication failed");
-                }
-
-                StatusTextBlock.Text = $"Step 1 Complete: OIDC authentication successful. Step 2: Initiating SAML flow...";
-
-                // Step 2: SAML Assertion
-                var config = GetCurrentOAuthConfig();
-                var samlResult = await InitiateSamlAssertionWithBrowserSession(config);
-                _currentSamlResult = samlResult;
-
-                if (samlResult.IsValid)
-                {
-                    DisplayHybridAuthResult(_currentLoginResult, samlResult);
-                    StatusTextBlock.Text = $"Successfully completed OIDC + SAML hybrid authentication with {_currentProvider}";
-                }
-                else
-                {
-                    StatusTextBlock.Text = $"OIDC succeeded but SAML assertion failed: {samlResult.Error}";
-                    DisplayLoginResult(_currentLoginResult); // Show OIDC result only
-                }
-
-                LoginButton.IsEnabled = true;
-                LogoutButton.IsEnabled = true;
-                RefreshTokenButton.IsEnabled = !string.IsNullOrEmpty(_currentLoginResult.RefreshToken);
-                WebView.Visibility = Visibility.Collapsed;
-            }
-            catch (Exception ex)
-            {
-                StatusTextBlock.Text = $"Hybrid Flow Error: {ex.Message}";
-                TokenTextBox.Text = ex.ToString();
-                LoginButton.IsEnabled = true;
-                WebView.Visibility = Visibility.Collapsed;
-            }
-        }
-
-        private async Task<SamlAssertionResult> InitiateSamlAssertionWithBrowserSession(OAuthConfig config)
-        {
-            try
-            {
-                _samlCompletionSource = new TaskCompletionSource<SamlAssertionResult>();
-
-                var samlUrl = BuildIdpInitiatedSamlUrl(config);
-                StatusTextBlock.Text = "Navigating to SAML IdP using existing browser session...";
-
-                await WebView.Dispatcher.InvokeAsync(() =>
-                {
-                    WebView.CoreWebView2.Navigate(samlUrl);
-                });
-
-                var timeoutTask = Task.Delay(TimeSpan.FromMinutes(2));
-                var completedTask = await Task.WhenAny(_samlCompletionSource.Task, timeoutTask);
-
-                if (completedTask == timeoutTask)
-                {
-                    return new SamlAssertionResult
-                    {
-                        IsValid = false,
-                        Error = "SAML assertion timed out",
-                        Attributes = new Dictionary<string, string>()
-                    };
-                }
-
-                return await _samlCompletionSource.Task;
-            }
-            catch (Exception ex)
-            {
-                return new SamlAssertionResult
-                {
-                    IsValid = false,
-                    Error = $"SAML assertion failed: {ex.Message}",
-                    Attributes = new Dictionary<string, string>()
-                };
-            }
-            finally
-            {
-                _samlCompletionSource = null;
-            }
-        }
-
-        private string BuildIdpInitiatedSamlUrl(OAuthConfig config)
-        {
-            var urlBuilder = new StringBuilder(config.SamlIdpUrl);
-            var queryParams = new List<string>();
-
-            if (!string.IsNullOrEmpty(config.SamlSpEntityId))
-            {
-                queryParams.Add($"spEntityID={Uri.EscapeDataString(config.SamlSpEntityId)}");
-            }
-
-            if (queryParams.Any())
-            {
-                var separator = config.SamlIdpUrl.Contains("?") ? "&" : "?";
-                urlBuilder.Append(separator);
-                urlBuilder.Append(string.Join("&", queryParams));
-            }
-
-            return urlBuilder.ToString();
-        }
-
-        private async Task<string> GetStreamContentAsync(System.IO.Stream stream)
-        {
-            try
-            {
-                using (var reader = new System.IO.StreamReader(stream))
-                {
-                    return await reader.ReadToEndAsync();
-                }
-            }
-            catch
-            {
-                return string.Empty;
-            }
-        }
-
-        private SamlAssertionResult ExtractSamlFromPostData(string postData)
-        {
-            try
-            {
-                var result = new SamlAssertionResult { Attributes = new Dictionary<string, string>() };
-
-                var formData = HttpUtility.ParseQueryString(postData);
-                var samlResponse = formData["SAMLResponse"];
-                var relayState = formData["RelayState"];
-
-                if (!string.IsNullOrEmpty(samlResponse))
-                {
-                    result.SamlResponse = samlResponse;
-                    result.RelayState = relayState ?? "";
-                    result.IsValid = true;
-                    result.ExpiresAt = DateTime.UtcNow.AddHours(1);
-
-                    Task.Run(async () => await ParseSamlAssertionAsync(result));
-                }
-
-                return result;
-            }
-            catch (Exception ex)
-            {
-                return new SamlAssertionResult
-                {
-                    IsValid = false,
-                    Error = $"Failed to extract SAML from POST data: {ex.Message}",
-                    Attributes = new Dictionary<string, string>()
-                };
-            }
-        }
-
-        private SamlAssertionResult ExtractSamlFromHtmlContent(string htmlContent)
-        {
-            try
-            {
-                var result = new SamlAssertionResult { Attributes = new Dictionary<string, string>() };
-
-                var samlPattern = @"name=[""']SAMLResponse[""'][^>]*value=[""']([^""']+)[""']";
-                var match = Regex.Match(htmlContent, samlPattern, RegexOptions.IgnoreCase);
-
-                if (match.Success)
-                {
-                    result.SamlResponse = WebUtility.HtmlDecode(match.Groups[1].Value);
-                    result.IsValid = true;
-                    result.ExpiresAt = DateTime.UtcNow.AddHours(1);
-
-                    var relayPattern = @"name=[""']RelayState[""'][^>]*value=[""']([^""']+)[""']";
-                    var relayMatch = Regex.Match(htmlContent, relayPattern, RegexOptions.IgnoreCase);
-                    if (relayMatch.Success)
-                    {
-                        result.RelayState = relayMatch.Groups[1].Value;
-                    }
-
-                    Task.Run(async () => await ParseSamlAssertionAsync(result));
-                }
-
-                return result;
-            }
-            catch (Exception ex)
-            {
-                return new SamlAssertionResult
-                {
-                    IsValid = false,
-                    Error = $"Failed to extract SAML from HTML: {ex.Message}",
-                    Attributes = new Dictionary<string, string>()
-                };
-            }
-        }
-
-        private async Task ParseSamlAssertionAsync(SamlAssertionResult result)
-        {
-            try
-            {
-                var decodedSaml = Encoding.UTF8.GetString(Convert.FromBase64String(result.SamlResponse));
-                result.RawSamlXml = decodedSaml;
-
-                var doc = new XmlDocument();
-                doc.LoadXml(decodedSaml);
-
-                var nsManager = new XmlNamespaceManager(doc.NameTable);
-                nsManager.AddNamespace("saml", "urn:oasis:names:tc:SAML:2.0:assertion");
-                nsManager.AddNamespace("samlp", "urn:oasis:names:tc:SAML:2.0:protocol");
-
-                // Extract attributes
-                var attributeNodes = doc.SelectNodes("//saml:Attribute", nsManager);
-                if (attributeNodes != null)
-                {
-                    foreach (XmlNode attr in attributeNodes)
-                    {
-                        var name = attr.Attributes?["Name"]?.Value;
-                        var valueNode = attr.SelectSingleNode("saml:AttributeValue", nsManager);
-                        var value = valueNode?.InnerText;
-
-                        if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(value))
-                        {
-                            result.Attributes[name] = value;
-                        }
-                    }
-                }
-
-                // Extract subject
-                var subjectNode = doc.SelectSingleNode("//saml:Subject/saml:NameID", nsManager);
-                if (subjectNode != null)
-                {
-                    result.Attributes["Subject"] = subjectNode.InnerText;
-                    result.Attributes["SubjectFormat"] = subjectNode.Attributes?["Format"]?.Value ?? "";
-                }
-
-                // Extract expiration time
-                var conditions = doc.SelectSingleNode("//saml:Conditions", nsManager);
-                if (conditions?.Attributes?["NotOnOrAfter"] != null)
-                {
-                    if (DateTime.TryParse(conditions.Attributes["NotOnOrAfter"].Value, out var expirationTime))
-                    {
-                        result.ExpiresAt = expirationTime;
-                    }
-                }
-
-                // Extract issuer
-                var issuerNode = doc.SelectSingleNode("//saml:Issuer", nsManager);
-                if (issuerNode != null)
-                {
-                    result.Attributes["Issuer"] = issuerNode.InnerText;
-                }
-
-                // Extract authentication context
-                var authnContextNode = doc.SelectSingleNode("//saml:AuthnContext/saml:AuthnContextClassRef", nsManager);
-                if (authnContextNode != null)
-                {
-                    result.Attributes["AuthnContextClassRef"] = authnContextNode.InnerText;
-                }
-            }
-            catch (Exception ex)
-            {
-                result.Attributes["ParseError"] = $"Failed to parse SAML assertion: {ex.Message}";
             }
         }
 
@@ -867,66 +483,6 @@ namespace OidcClientSample
             TokenTextBox.Text = tokenDisplay.ToString();
         }
 
-        private void DisplayHybridAuthResult(LoginResult oidcResult, SamlAssertionResult samlResult)
-        {
-            var tokenDisplay = new StringBuilder();
-            tokenDisplay.AppendLine($"=== HYBRID AUTHENTICATION RESULT (OidcClient) ===");
-            tokenDisplay.AppendLine($"Provider: {_currentProvider}");
-            tokenDisplay.AppendLine($"Flow: OIDC + SAML Hybrid");
-            tokenDisplay.AppendLine($"Timestamp: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-            tokenDisplay.AppendLine();
-
-            // OIDC Results
-            tokenDisplay.AppendLine("=== OIDC TOKEN INFORMATION ===");
-            tokenDisplay.AppendLine($"Access Token: {oidcResult.AccessToken}");
-            tokenDisplay.AppendLine($"Token Type: Bearer");
-            tokenDisplay.AppendLine($"Expires At: {oidcResult.AccessTokenExpiration:yyyy-MM-dd HH:mm:ss} UTC");
-
-            if (!string.IsNullOrEmpty(oidcResult.IdentityToken))
-                tokenDisplay.AppendLine($"ID Token: {oidcResult.IdentityToken}");
-
-            if (!string.IsNullOrEmpty(oidcResult.RefreshToken))
-                tokenDisplay.AppendLine($"Refresh Token: {oidcResult.RefreshToken}");
-
-            //tokenDisplay.AppendLine($"Scope: {oidcResult.Scope}");
-            tokenDisplay.AppendLine($"User: {oidcResult.User?.Identity?.Name}");
-            tokenDisplay.AppendLine();
-
-            // SAML Results
-            tokenDisplay.AppendLine("=== SAML ASSERTION INFORMATION ===");
-            tokenDisplay.AppendLine($"SAML Valid: {samlResult.IsValid}");
-            tokenDisplay.AppendLine($"SAML Expires: {samlResult.ExpiresAt:yyyy-MM-dd HH:mm:ss} UTC");
-
-            if (!string.IsNullOrEmpty(samlResult.RelayState))
-                tokenDisplay.AppendLine($"RelayState: {samlResult.RelayState}");
-
-            if (samlResult.IsValid)
-            {
-                tokenDisplay.AppendLine($"SAML Response Length: {samlResult.SamlResponse?.Length ?? 0} characters");
-                tokenDisplay.AppendLine("SAML Attributes:");
-                foreach (var attr in samlResult.Attributes)
-                {
-                    tokenDisplay.AppendLine($"  {attr.Key}: {attr.Value}");
-                }
-
-                if (!string.IsNullOrEmpty(samlResult.RawSamlXml))
-                {
-                    tokenDisplay.AppendLine();
-                    tokenDisplay.AppendLine("=== RAW SAML XML (First 500 chars) ===");
-                    var xmlPreview = samlResult.RawSamlXml.Length > 500
-                        ? samlResult.RawSamlXml.Substring(0, 500) + "..."
-                        : samlResult.RawSamlXml;
-                    tokenDisplay.AppendLine(xmlPreview);
-                }
-            }
-            else
-            {
-                tokenDisplay.AppendLine($"SAML Error: {samlResult.Error}");
-            }
-
-            TokenTextBox.Text = tokenDisplay.ToString();
-        }
-
         private async void LogoutButton_Click(object sender, RoutedEventArgs e)
         {
             try
@@ -1017,24 +573,7 @@ namespace OidcClientSample
                 else
                 {
                     //_currentLoginResult = refreshResult;
-
-                    // If this is hybrid flow, also refresh SAML assertion
-                    if (_currentFlow == AuthFlow.OidcThenSaml)
-                    {
-                        StatusTextBlock.Text = "Token refreshed. Refreshing SAML assertion...";
-                        WebView.Visibility = Visibility.Visible;
-
-                        var config = GetCurrentOAuthConfig();
-                        var samlResult = await InitiateSamlAssertionWithBrowserSession(config);
-                        _currentSamlResult = samlResult;
-                        //DisplayHybridAuthResult(refreshResult, samlResult);
-                        WebView.Visibility = Visibility.Collapsed;
-                    }
-                    else
-                    {
                         //DisplayLoginResult(refreshResult);
-                    }
-
                     StatusTextBlock.Text = "Token refreshed successfully";
                     RefreshTokenButton.IsEnabled = !string.IsNullOrEmpty(refreshResult.RefreshToken);
                 }
@@ -1054,15 +593,6 @@ namespace OidcClientSample
             _customBrowser?.Dispose();
             _httpClient?.Dispose();
             _samlCompletionSource?.TrySetCanceled();
-
-            // Unsubscribe from WebView events
-            if (WebView?.CoreWebView2 != null)
-            {
-                WebView.CoreWebView2.NavigationStarting -= CoreWebView2_NavigationStarting;
-                WebView.CoreWebView2.NavigationCompleted -= CoreWebView2_NavigationCompleted;
-                WebView.CoreWebView2.WebResourceResponseReceived -= CoreWebView2_WebResourceResponseReceived;
-                WebView.CoreWebView2.WebResourceRequested -= CoreWebView2_WebResourceRequested;
-            }
 
             base.OnClosed(e);
         }
